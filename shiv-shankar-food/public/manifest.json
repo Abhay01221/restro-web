@@ -1,0 +1,16 @@
+{
+  "name": "Shiv Shankar Chinese Food",
+  "short_name": "Shiv Shankar",
+  "description": "Authentic Chinese Food in Hinjawadi, Pune",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0D0D0D",
+  "theme_color": "#C0392B",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
