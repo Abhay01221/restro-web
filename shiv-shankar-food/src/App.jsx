@@ -13,6 +13,7 @@ import CartDrawer from './components/CartDrawer';
 import ChatBot from './components/ChatBot';
 import ScrollToTop from './components/ScrollToTop';
 import ProtectedRoute from './components/ProtectedRoute';
+import AdminRoute from './components/AdminRoute';
 import { ChevronUp } from 'lucide-react';
 
 // Lazy-loaded pages
@@ -28,6 +29,7 @@ const Dashboard    = lazy(() => import('./pages/Dashboard'));
 const About        = lazy(() => import('./pages/About'));
 const Contact      = lazy(() => import('./pages/Contact'));
 const NotFound     = lazy(() => import('./pages/NotFound'));
+const Admin        = lazy(() => import('./pages/Admin'));
 
 const PageLoader = () => (
   <div style={{ minHeight: '60vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -143,6 +145,7 @@ function AppContent() {
             <Route path="/dashboard"      element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
             <Route path="/about"          element={<About />} />
             <Route path="/contact"        element={<Contact />} />
+            <Route path="/admin"          element={<AdminRoute><Admin /></AdminRoute>} />
             <Route path="*"               element={<NotFound />} />
           </Routes>
         </Suspense>

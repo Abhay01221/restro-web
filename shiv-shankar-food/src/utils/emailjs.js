@@ -89,3 +89,32 @@ export const sendOrderCancellationEmail = async ({ customerName, customerEmail, 
     PUBLIC_KEY
   );
 };
+
+// ─── Order accepted email (admin action) ─────────────────────────────────────
+export const sendOrderAcceptedEmail = async ({ customerName, customerEmail, orderId }) => {
+  const ACCEPT_TEMPLATE = import.meta.env.VITE_EMAILJS_ACCEPT_TEMPLATE_ID;
+  if (!isConfigured() || !ACCEPT_TEMPLATE || ACCEPT_TEMPLATE.startsWith('your_')) {
+    console.warn('[EmailJS] Accept template not configured — skipping');
+    return;
+  }
+  return emailjs.send(SERVICE_ID, ACCEPT_TEMPLATE, {
+    name:     customerName,
+    to_email: customerEmail,
+    order_id: orderId,
+  }, PUBLIC_KEY);
+};
+
+// ─── Order rejected email (admin action) ─────────────────────────────────────
+export const sendOrderRejectedEmail = async ({ customerName, customerEmail, orderId, reason }) => {
+  const REJECT_TEMPLATE = import.meta.env.VITE_EMAILJS_REJECT_TEMPLATE_ID;
+  if (!isConfigured() || !REJECT_TEMPLATE || REJECT_TEMPLATE.startsWith('your_')) {
+    console.warn('[EmailJS] Reject template not configured — skipping');
+    return;
+  }
+  return emailjs.send(SERVICE_ID, REJECT_TEMPLATE, {
+    name:     customerName,
+    to_email: customerEmail,
+    order_id: orderId,
+    reason:   reason || 'No reason provided',
+  }, PUBLIC_KEY);
+};

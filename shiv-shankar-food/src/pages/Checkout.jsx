@@ -5,10 +5,10 @@ import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js';
 import { Helmet } from 'react-helmet-async';
 import { Check, ShieldCheck, AlertCircle, CheckCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { collection, addDoc } from 'firebase/firestore';
 import { useCart } from '../store/cartStore';
 import useAuthStore from '../store/authStore';
-import { saveOrder } from '../firebase/firestore';
-import { generateOrderId } from '../utils/generateOrderId';
+import { auth, db } from '../firebase/config';
 import { sendOrderConfirmationEmail } from '../utils/emailjs';
 
 const STEPS = ['Delivery Details', 'Review Order', 'Payment'];
@@ -60,68 +60,98 @@ export default function Checkout() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handlePaymentSuccess = async (details) => {
+  // ─── SINGLE unified order handler — used by BOTH PayPal and UPI ─────────────
+  const handleOrderSuccess = async (paymentMethod = 'UPI', transactionId = 'UPI-MANUAL') => {
+    console.log('=== ORDER FLOW START ===');
+    console.log('paymentMethod:', paymentMethod);
+    console.log('transactionId:', transactionId);
+    console.log('auth.currentUser:', auth.currentUser?.uid);
+    console.log('items:', items?.length);
+    console.log('grandTotal:', grandTotal);
+
+    // Guard: must be logged in
+    if (!auth.currentUser) {
+      console.error('NO AUTH USER — aborting');
+      toast.error('You must be logged in to place an order.');
+      return;
+    }
+
+    // Guard: must have items
+    if (!items || items.length === 0) {
+      console.error('EMPTY CART — aborting');
+      toast.error('Your cart is empty.');
+      return;
+    }
+
     setPaymentProcessing(true);
-    const orderId = generateOrderId();
 
-    // Debug: verify user is authenticated
-    console.log('[Checkout] USER:', user);
-    console.log('[Checkout] PayPal details:', details);
-
+    const orderId = `SSF-${Date.now()}`;
     const orderData = {
       orderId,
-      userId:        user?.uid   || 'guest',
-      customerName:  form.name,
-      customerEmail: form.email,
-      customerPhone: form.phone,
+      userId:        auth.currentUser.uid,
+      customerName:  form.name  || auth.currentUser.displayName || '',
+      customerEmail: form.email || auth.currentUser.email       || '',
+      customerPhone: form.phone || '',
       items: items.map(i => ({
-        id:       i.id,
-        name:     i.name,
-        price:    i.price,
-        quantity: i.quantity,
-        isVeg:    i.isVeg,
+        id:       i.id       || '',
+        name:     i.name     || '',
+        price:    Number(i.price)    || 0,
+        quantity: Number(i.quantity) || 1,
+        isVeg:    i.isVeg ?? true,
       })),
-      subtotal,
-      gst,
-      platformFee:  platformFee || 0,
-      deliveryFee,
-      discount:     discount || 0,
-      grandTotal,
+      subtotal:     Number(subtotal)     || 0,
+      gst:          Number(gst)          || 0,
+      platformFee:  Number(platformFee)  || 0,
+      deliveryFee:  Number(deliveryFee)  || 0,
+      discount:     Number(discount)     || 0,
+      grandTotal:   Number(grandTotal)   || 0,
+      total:        Number(grandTotal)   || 0,
       promoCode:    promoCode || null,
       deliveryAddress: orderType === 'delivery' ? {
-        line1:    form.address,
-        city:     form.city,
-        pincode:  form.pincode,
-        landmark: form.landmark,
+        line1:    form.address  || '',
+        city:     form.city     || 'Pune',
+        pincode:  form.pincode  || '',
+        landmark: form.landmark || '',
       } : null,
-      orderType,
+      orderType:           orderType || 'takeaway',
       specialInstructions: form.instructions || '',
-      paymentMethod:  'PayPal',
+      paymentMethod,
       paymentStatus:  'completed',
-      paypalOrderId:  details.id,
+      transactionId,
       status:         'confirmed',
+      createdAt:      new Date().toISOString(),
     };
 
-    console.log('[Checkout] ORDER DATA to save:', orderData);
+    console.log('ORDER DATA:', JSON.stringify(orderData, null, 2));
+    console.log('Writing to Firestore collection "orders"...');
 
     try {
-      // Save to Firestore (primary — always runs)
-      await saveOrder(orderData);
+      const docRef = await addDoc(collection(db, 'orders'), orderData);
+      console.log('=== ORDER SAVED ✅ Firestore ID:', docRef.id, '===');
 
-      // Send confirmation email (non-blocking)
+      // Email — non-blocking
       sendOrderConfirmationEmail(orderData).catch(err =>
-        console.error('[EmailJS] Confirmation email failed:', err)
+        console.error('[EmailJS] failed (non-critical):', err)
       );
 
       clearCart();
       toast.success('Order placed successfully! 🎉');
       navigate(`/order-success?id=${orderId}`);
     } catch (err) {
-      console.error('[Checkout] Firestore save error:', err);
-      toast.error(`Order save failed: ${err.message}`);
+      console.error('=== FIRESTORE SAVE FAILED ❌ ===');
+      console.error('code:', err.code);
+      console.error('message:', err.message);
+      console.error('full error:', err);
+      toast.error(`Order failed: ${err.message}`);
     } finally {
       setPaymentProcessing(false);
     }
+  };
+
+  // PayPal wrapper
+  const handlePaymentSuccess = async (details) => {
+    console.log('PayPal captured:', details.id);
+    await handleOrderSuccess('PayPal', details.id);
   };
 
   const inputField = (name, label, type = 'text', placeholder = '', required = true) => (
@@ -291,6 +321,7 @@ export default function Checkout() {
                   <PayPalSection
                     grandTotal={grandTotal}
                     onSuccess={handlePaymentSuccess}
+                    onUpiConfirm={() => handleOrderSuccess('UPI', 'UPI-MANUAL')}
                     orderContext={{ items, subtotal, gst, platformFee, deliveryFee, grandTotal, discount, promoCode, orderType, form, user, clearCart, navigate }}
                   />
                 )}
@@ -338,11 +369,12 @@ export default function Checkout() {
 }
 
 // ─── PayPal Section ───────────────────────────────────────────────────────────
-function PayPalSection({ grandTotal, onSuccess, orderContext }) {
+function PayPalSection({ grandTotal, onSuccess, onUpiConfirm }) {
   const clientId = import.meta.env.VITE_PAYPAL_CLIENT_ID;
 
+  // No PayPal configured → show UPI only (full mode with confirm button)
   if (!clientId || clientId === 'your_paypal_client_id') {
-    return <UpiQrFallback grandTotal={grandTotal} orderContext={orderContext} />;
+    return <UpiQrFallback grandTotal={grandTotal} onUpiConfirm={onUpiConfirm} />;
   }
 
   return (
@@ -357,32 +389,40 @@ function PayPalSection({ grandTotal, onSuccess, orderContext }) {
           forceReRender={[grandTotal]}
           createOrder={(_data, actions) =>
             actions.order.create({
-              purchase_units: [{ amount: { value: grandTotal.toFixed(2), currency_code: 'INR' }, description: 'Shiv Shankar Chinese Food Order' }],
+              purchase_units: [{
+                amount: { value: grandTotal.toFixed(2), currency_code: 'INR' },
+                description: 'Shiv Shankar Chinese Food Order',
+              }],
             })
           }
           onApprove={async (_data, actions) => {
             const details = await actions.order.capture();
             await onSuccess(details);
           }}
-          onError={(err) => { console.error('[PayPal] Error:', err); toast.error('Payment failed. Please try again or use UPI.'); }}
+          onError={(err) => {
+            console.error('[PayPal] Error:', err);
+            toast.error('Payment failed. Please try again or use UPI.');
+          }}
           onCancel={() => toast('Payment cancelled.', { icon: 'ℹ️' })}
         />
       </PayPalScriptProvider>
 
+      {/* UPI option below PayPal — compact, no confirm button */}
       <div style={{ marginTop: '1.5rem' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '1rem 0' }}>
           <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
           <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>or pay via UPI</span>
           <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
         </div>
-        <UpiQrFallback grandTotal={grandTotal} compact orderContext={orderContext} />
+        {/* Full UPI with confirm button when PayPal is also shown */}
+        <UpiQrFallback grandTotal={grandTotal} onUpiConfirm={onUpiConfirm} />
       </div>
     </div>
   );
 }
 
-// ─── UPI QR Fallback ──────────────────────────────────────────────────────────
-function UpiQrFallback({ grandTotal, compact = false, orderContext }) {
+// ─── UPI QR + Confirm Button ──────────────────────────────────────────────────
+function UpiQrFallback({ grandTotal, onUpiConfirm }) {
   const [confirming, setConfirming] = useState(false);
 
   const amount    = Math.round(Number(grandTotal)).toFixed(2);
@@ -390,75 +430,23 @@ function UpiQrFallback({ grandTotal, compact = false, orderContext }) {
   const payeeName = 'Abhay';
   const upiUrl    = `upi://pay?pa=${upiId}&pn=${encodeURIComponent(payeeName)}&am=${amount}&cu=INR`;
 
-  console.log('[UPI QR] grandTotal:', grandTotal, '→ amount sent:', amount, '→ URL:', upiUrl);
+  const handleClick = async () => {
+    console.log('=== UPI CONFIRM CLICKED ===');
+    console.log('grandTotal at click time:', grandTotal);
+    console.log('onUpiConfirm type:', typeof onUpiConfirm);
 
-  // ── "I have completed payment" handler ──────────────────────────────────────
-  const handleUpiConfirm = async () => {
-    const { items, subtotal, gst, platformFee, deliveryFee, grandTotal: total,
-            discount, promoCode, orderType, form, user, clearCart, navigate } = orderContext;
-
-    if (!items || items.length === 0) {
-      toast.error('Your cart is empty. Please add items first.');
+    if (typeof onUpiConfirm !== 'function') {
+      console.error('onUpiConfirm is not a function!', onUpiConfirm);
+      toast.error('Internal error: handler not connected.');
       return;
     }
 
     setConfirming(true);
-    const orderId = generateOrderId();
-
-    // Debug: verify user and order data
-    console.log('[UPI Confirm] USER:', user);
-
-    const orderData = {
-      orderId,
-      userId:        user?.uid   || 'guest',
-      customerName:  form.name,
-      customerEmail: form.email,
-      customerPhone: form.phone,
-      items: items.map(i => ({
-        id:       i.id,
-        name:     i.name,
-        price:    i.price,
-        quantity: i.quantity,
-        isVeg:    i.isVeg,
-      })),
-      subtotal,
-      gst,
-      platformFee:   platformFee || 0,
-      deliveryFee,
-      discount:      discount || 0,
-      grandTotal:    total,
-      promoCode:     promoCode || null,
-      deliveryAddress: orderType === 'delivery' ? {
-        line1:    form.address,
-        city:     form.city,
-        pincode:  form.pincode,
-        landmark: form.landmark,
-      } : null,
-      orderType,
-      specialInstructions: form.instructions || '',
-      paymentMethod:  'UPI',
-      paymentStatus:  'completed',
-      status:         'confirmed',
-    };
-
-    console.log('[UPI Confirm] ORDER DATA:', orderData);
-
     try {
-      // 1. Save to Firestore — AWAIT before anything else
-      await saveOrder(orderData);
-
-      // 2. Send confirmation email (non-blocking — never fails the order)
-      sendOrderConfirmationEmail(orderData).catch(err =>
-        console.error('[EmailJS] Order confirmation email failed:', err)
-      );
-
-      // 3. Clear cart and redirect AFTER save completes
-      clearCart();
-      toast.success('Order placed successfully! 🎉');
-      navigate(`/order-success?id=${orderId}`);
+      await onUpiConfirm();
     } catch (err) {
-      console.error('[UPI Confirm] Firestore save error:', err);
-      toast.error(`Failed to save order: ${err.message}`);
+      console.error('UPI confirm threw:', err);
+      toast.error(`Order failed: ${err.message}`);
     } finally {
       setConfirming(false);
     }
@@ -466,79 +454,72 @@ function UpiQrFallback({ grandTotal, compact = false, orderContext }) {
 
   return (
     <div style={{ textAlign: 'center' }}>
-      {!compact && (
-        <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: '1rem' }}>
-          Scan the QR code with any UPI app (GPay, PhonePe, Paytm)
-        </p>
-      )}
+      <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: '1rem' }}>
+        Scan with any UPI app (GPay, PhonePe, Paytm)
+      </p>
 
-      {/* QR code */}
+      {/* QR */}
       <div style={{ display: 'inline-block', padding: 12, background: 'white', borderRadius: 12, border: '1px solid var(--border)', marginBottom: 12 }}>
         <img
-          src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(upiUrl)}`}
+          src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(upiUrl)}`}
           alt="UPI QR Code"
-          width={compact ? 120 : 160}
-          height={compact ? 120 : 160}
+          width={180}
+          height={180}
           style={{ display: 'block', borderRadius: 4 }}
         />
       </div>
 
-      <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--accent)', marginBottom: 4 }}>
+      <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--accent)', marginBottom: 4 }}>
         ₹{Math.round(Number(grandTotal))}
       </p>
-      <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+      <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14 }}>
         UPI ID: <strong style={{ color: 'var(--text)' }}>{upiId}</strong>
       </p>
 
-      {/* Open UPI app deep link */}
+      {/* Open UPI app */}
       <a
         href={upiUrl}
-        style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: '#5F259F', color: 'white', borderRadius: 8, textDecoration: 'none', fontSize: 13, fontWeight: 600, marginBottom: 16 }}
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: '#5F259F', color: 'white', borderRadius: 8, textDecoration: 'none', fontSize: 13, fontWeight: 600, marginBottom: 20 }}
       >
         📱 Open UPI App
       </a>
 
-      {/* Confirmation button — only shown in full (non-compact) mode */}
-      {!compact && orderContext && (
-        <div style={{ marginTop: 8 }}>
-          <div style={{ height: 1, background: 'var(--border)', margin: '12px 0' }} />
-          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
-            After completing payment in your UPI app, tap below to confirm your order.
-          </p>
-          <button
-            onClick={handleUpiConfirm}
-            disabled={confirming}
-            style={{
-              width: '100%',
-              padding: '13px',
-              background: confirming ? 'var(--surface-2)' : '#22C55E',
-              color: 'white',
-              border: 'none',
-              borderRadius: 10,
-              fontSize: 15,
-              fontWeight: 700,
-              cursor: confirming ? 'not-allowed' : 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              transition: 'background 0.2s',
-            }}
-          >
-            {confirming ? (
-              <>
-                <span style={{ width: 16, height: 16, border: '2px solid rgba(255,255,255,0.3)', borderTopColor: 'white', borderRadius: '50%', animation: 'spin 0.7s linear infinite', display: 'inline-block' }} />
-                Confirming order…
-              </>
-            ) : (
-              <>
-                <CheckCircle size={18} />
-                I have completed payment
-              </>
-            )}
-          </button>
-        </div>
-      )}
+      {/* Confirm button */}
+      <div>
+        <div style={{ height: 1, background: 'var(--border)', margin: '0 0 14px' }} />
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+          After paying in your UPI app, tap below to confirm your order.
+        </p>
+        <button
+          type="button"
+          onClick={handleClick}
+          disabled={confirming}
+          style={{
+            width: '100%',
+            padding: '14px',
+            background: confirming ? '#555' : '#22C55E',
+            color: 'white',
+            border: 'none',
+            borderRadius: 10,
+            fontSize: 16,
+            fontWeight: 700,
+            cursor: confirming ? 'not-allowed' : 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 8,
+          }}
+        >
+          {confirming ? (
+            <>
+              <span style={{ width: 18, height: 18, border: '2px solid rgba(255,255,255,0.3)', borderTopColor: 'white', borderRadius: '50%', animation: 'spin 0.7s linear infinite', display: 'inline-block' }} />
+              Saving order…
+            </>
+          ) : (
+            <><CheckCircle size={20} /> I have completed payment</>
+          )}
+        </button>
+      </div>
     </div>
   );
 }

@@ -8,7 +8,6 @@ import {
   query,
   where,
   getDocs,
-  orderBy,
   serverTimestamp,
   arrayUnion,
   arrayRemove,
@@ -22,11 +21,11 @@ export const createUserProfile = async (uid, data) => {
   if (!snap.exists()) {
     await setDoc(userRef, {
       uid,
-      name:       data.name  || '',
-      email:      data.email || '',
-      phone:      '',
-      addresses:  [],
-      createdAt:  serverTimestamp(),
+      name:        data.name  || '',
+      email:       data.email || '',
+      phone:       '',
+      addresses:   [],
+      createdAt:   serverTimestamp(),
       ordersCount: 0,
     });
   }
@@ -52,55 +51,103 @@ export const removeAddress = async (uid, address) => {
 
 // ─── ORDERS ───────────────────────────────────────────────────────────────────
 /**
- * Save an order to Firestore.
- * Uses addDoc (auto-ID) so Firestore always creates the document,
- * and stores the app-generated orderId as a field for display.
+ * Save an order to Firestore using addDoc (auto-generated document ID).
+ * The app-generated orderId (SSF-xxx) is stored as a FIELD, not the doc ID.
  *
- * orderData MUST include: userId, orderId, items, grandTotal, status
+ * Required fields in orderData: userId, orderId, items
  */
 export const saveOrder = async (orderData) => {
-  console.log('[Firestore] Saving order...', orderData);
+  console.log('[Firestore] ── saveOrder called ──');
+  console.log('[Firestore] userId:', orderData.userId);
+  console.log('[Firestore] orderId:', orderData.orderId);
+  console.log('[Firestore] items count:', orderData.items?.length);
+  console.log('[Firestore] grandTotal:', orderData.grandTotal);
+  console.log('[Firestore] full orderData:', JSON.stringify(orderData, null, 2));
 
-  // Validate required fields before attempting write
-  if (!orderData.userId) {
-    throw new Error('Cannot save order: userId is missing. User must be logged in.');
+  if (!orderData.userId || orderData.userId === 'guest') {
+    throw new Error('User must be logged in to place an order. userId is missing or "guest".');
   }
   if (!orderData.items || orderData.items.length === 0) {
-    throw new Error('Cannot save order: items array is empty.');
+    throw new Error('Order must contain at least one item.');
   }
 
-  const docRef = await addDoc(collection(db, 'orders'), {
+  const payload = {
     ...orderData,
+    // Ensure total field exists (some queries use "total" instead of "grandTotal")
+    total:     orderData.grandTotal,
     createdAt: serverTimestamp(),
-  });
+  };
 
-  console.log('[Firestore] Order saved with document ID:', docRef.id);
+  console.log('[Firestore] Writing to collection "orders"...');
+  const docRef = await addDoc(collection(db, 'orders'), payload);
+  console.log('[Firestore] ✅ Order saved! Firestore document ID:', docRef.id);
 
-  // Increment user order count (non-blocking — don't fail the order if this fails)
-  updateDoc(doc(db, 'users', orderData.userId), {
-    ordersCount: (await getDoc(doc(db, 'users', orderData.userId))
-      .then(s => s.exists() ? (s.data().ordersCount || 0) : 0)
-      .catch(() => 0)) + 1,
-  }).catch(err => console.warn('[Firestore] ordersCount increment failed:', err.message));
+  // Increment ordersCount on user profile — non-blocking
+  getDoc(doc(db, 'users', orderData.userId))
+    .then(snap => {
+      if (snap.exists()) {
+        return updateDoc(doc(db, 'users', orderData.userId), {
+          ordersCount: (snap.data().ordersCount || 0) + 1,
+        });
+      }
+    })
+    .catch(err => console.warn('[Firestore] ordersCount increment failed (non-critical):', err.message));
 
-  return { firestoreId: docRef.id, ...orderData };
+  return { firestoreId: docRef.id, ...payload };
 };
 
+/**
+ * Fetch all orders for a user.
+ * NOTE: Does NOT use orderBy to avoid requiring a composite index.
+ * Orders are sorted client-side by createdAt.
+ */
 export const getUserOrders = async (userId) => {
-  console.log('[Firestore] Fetching orders for userId:', userId);
+  console.log('[Firestore] ── getUserOrders called ──');
+  console.log('[Firestore] Querying orders where userId ==', userId);
+
+  if (!userId) {
+    console.error('[Firestore] getUserOrders: userId is empty!');
+    return [];
+  }
+
+  // Simple query — no orderBy, no composite index needed
   const q = query(
     collection(db, 'orders'),
-    where('userId', '==', userId),
-    orderBy('createdAt', 'desc')
+    where('userId', '==', userId)
   );
+
   const snap = await getDocs(q);
-  const orders = snap.docs.map(d => ({ firestoreId: d.id, ...d.data() }));
-  console.log('[Firestore] Orders fetched:', orders.length);
+  console.log('[Firestore] Raw snapshot size:', snap.size);
+
+  const orders = snap.docs.map(d => {
+    const data = d.data();
+    return {
+      firestoreId: d.id,
+      ...data,
+      // Normalise createdAt for display — serverTimestamp returns a Firestore Timestamp
+      createdAt: data.createdAt || null,
+    };
+  });
+
+  // Sort newest first client-side
+  orders.sort((a, b) => {
+    const ta = a.createdAt?.seconds ?? 0;
+    const tb = b.createdAt?.seconds ?? 0;
+    return tb - ta;
+  });
+
+  console.log('[Firestore] ✅ Orders fetched:', orders.length);
+  orders.forEach((o, i) =>
+    console.log(`  [${i}] orderId=${o.orderId} status=${o.status} total=${o.grandTotal}`)
+  );
+
   return orders;
 };
 
+/**
+ * Get a single order by the app-generated orderId field (SSF-xxx).
+ */
 export const getOrderById = async (orderId) => {
-  // orderId here is the app-generated "SSF-xxx" field, not the Firestore doc ID
   const q = query(collection(db, 'orders'), where('orderId', '==', orderId));
   const snap = await getDocs(q);
   if (snap.empty) return null;
@@ -108,10 +155,88 @@ export const getOrderById = async (orderId) => {
   return { firestoreId: d.id, ...d.data() };
 };
 
-// Cancel an order — only allowed for pending/confirmed status
+/**
+ * Cancel an order by its Firestore document ID (firestoreId).
+ */
 export const cancelOrder = async (firestoreId) => {
+  console.log('[Firestore] Cancelling order firestoreId:', firestoreId);
   await updateDoc(doc(db, 'orders', firestoreId), {
     status:      'cancelled',
     cancelledAt: serverTimestamp(),
   });
+  console.log('[Firestore] ✅ Order cancelled');
+};
+
+// ─── ADMIN FUNCTIONS ──────────────────────────────────────────────────────────
+
+/**
+ * Fetch ALL orders (admin only — no userId filter).
+ * Sorted client-side newest first.
+ */
+export const getAllOrders = async () => {
+  console.log('[ADMIN] Fetching all orders...');
+  const snap = await getDocs(collection(db, 'orders'));
+  const orders = snap.docs.map(d => ({ firestoreId: d.id, ...d.data() }));
+  orders.sort((a, b) => {
+    const ta = a.createdAt?.seconds ?? 0;
+    const tb = b.createdAt?.seconds ?? 0;
+    return tb - ta;
+  });
+  console.log('[ADMIN] Total orders fetched:', orders.length);
+  return orders;
+};
+
+/**
+ * Accept an order.
+ */
+export const acceptOrder = async (firestoreId, adminNote = '') => {
+  console.log('[ADMIN] Accepting order:', firestoreId);
+  await updateDoc(doc(db, 'orders', firestoreId), {
+    status:        'accepted',
+    adminNote,
+    adminActionAt: serverTimestamp(),
+    refundStatus:  'none',
+  });
+  console.log('[ADMIN] Order accepted:', firestoreId);
+};
+
+/**
+ * Reject an order.
+ */
+export const rejectOrder = async (firestoreId, adminNote = '') => {
+  console.log('[ADMIN] Rejecting order:', firestoreId);
+  await updateDoc(doc(db, 'orders', firestoreId), {
+    status:        'rejected',
+    adminNote,
+    adminActionAt: serverTimestamp(),
+    refundStatus:  'initiated',
+  });
+  console.log('[ADMIN] Order rejected:', firestoreId);
+};
+
+/**
+ * Mark an accepted order as completed.
+ */
+export const completeOrder = async (firestoreId) => {
+  console.log('[ADMIN] Completing order:', firestoreId);
+  await updateDoc(doc(db, 'orders', firestoreId), {
+    status:        'completed',
+    adminActionAt: serverTimestamp(),
+  });
+  console.log('[ADMIN] Order completed:', firestoreId);
+};
+
+/**
+ * Get user role from Firestore.
+ */
+export const getUserRole = async (uid) => {
+  const snap = await getDoc(doc(db, 'users', uid));
+  return snap.exists() ? (snap.data().role || 'user') : 'user';
+};
+
+/**
+ * Set a user's role (call this once manually to make yourself admin).
+ */
+export const setUserRole = async (uid, role) => {
+  await updateDoc(doc(db, 'users', uid), { role });
 };

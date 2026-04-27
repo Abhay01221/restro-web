@@ -10,6 +10,19 @@ import {
   resendVerificationEmail,
   getAuthErrorMessage,
 } from '../firebase/auth';
+import { getUserProfile } from '../firebase/firestore';
+
+// ─── Role-aware redirect ──────────────────────────────────────────────────────
+// After login, check Firestore role. Admin → /admin, everyone else → redirect param or /
+const getRoleRedirect = async (uid, fallback) => {
+  try {
+    const profile = await getUserProfile(uid);
+    if (profile?.role === 'admin') return '/admin';
+  } catch (err) {
+    console.warn('[Login] Role check failed (non-critical):', err.message);
+  }
+  return fallback;
+};
 
 // ─── Inline spinner ───────────────────────────────────────────────────────────
 const Spinner = ({ light = true }) => (
@@ -61,9 +74,10 @@ export default function Login() {
 
     setLoading(true);
     try {
-      await loginWithEmail(email.trim(), password);
+      const user = await loginWithEmail(email.trim(), password);
       toast.success('Welcome back! 🎉');
-      navigate(redirect, { replace: true });
+      const dest = await getRoleRedirect(user.uid, redirect);
+      navigate(dest, { replace: true });
     } catch (err) {
       console.error('[Auth Error]', err.code, err.message, err);
 
@@ -94,7 +108,8 @@ export default function Login() {
       if (user) {
         // popup succeeded
         toast.success('Signed in with Google! 🎉');
-        navigate(redirect, { replace: true });
+        const dest = await getRoleRedirect(user.uid, redirect);
+        navigate(dest, { replace: true });
       }
       // null = popup closed or redirect initiated — both are silent
     } catch (err) {
