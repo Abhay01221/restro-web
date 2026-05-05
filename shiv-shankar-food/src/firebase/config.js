@@ -8,15 +8,18 @@ import {
 import { getFirestore } from 'firebase/firestore';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
-// Values come from .env (VITE_ prefix) with the real project values as fallback.
-// This ensures the app works even if Vite hasn't reloaded the env yet.
+// All values come strictly from .env — no hardcoded fallbacks to avoid
+// hidden whitespace/newline issues (e.g. %0D%0A in authDomain).
+const authDomain = (import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '').trim();
+console.log('[Firebase] AUTH DOMAIN:', JSON.stringify(authDomain));
+
 const firebaseConfig = {
-  apiKey:            import.meta.env.VITE_FIREBASE_API_KEY            || 'AIzaSyAxQ6Y87yjPf4RkGA3LpBArguLcUg7vll0',
-  authDomain:        import.meta.env.VITE_FIREBASE_AUTH_DOMAIN        || 'shiv-shankar-food.firebaseapp.com',
-  projectId:         import.meta.env.VITE_FIREBASE_PROJECT_ID         || 'shiv-shankar-food',
-  storageBucket:     import.meta.env.VITE_FIREBASE_STORAGE_BUCKET     || 'shiv-shankar-food.firebasestorage.app',
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '597796297926',
-  appId:             import.meta.env.VITE_FIREBASE_APP_ID             || '1:597796297926:web:b19f7b7679ec9875d60bc7',
+  apiKey:            (import.meta.env.VITE_FIREBASE_API_KEY            || '').trim(),
+  authDomain,
+  projectId:         (import.meta.env.VITE_FIREBASE_PROJECT_ID         || '').trim(),
+  storageBucket:     (import.meta.env.VITE_FIREBASE_STORAGE_BUCKET     || '').trim(),
+  messagingSenderId: (import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '').trim(),
+  appId:             (import.meta.env.VITE_FIREBASE_APP_ID             || '').trim(),
 };
 
 // ─── Singleton app init ───────────────────────────────────────────────────────
